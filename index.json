@@ -30,18 +30,19 @@
       "id": "baram-word-count",
       "name": "Word Count",
       "description": "Shows the current document's word and character count in the status bar.",
-      "version": "1.0.1",
+      "version": "2.0.0",
       "author": "Baram",
       "license": "Apache-2.0",
-      "downloadUrl": "https://sayinel.github.io/baram-plugins/plugins/baram-word-count-1.0.1.zip",
-      "checksum": "fc68dc24d673af3ea8b6426748a3deeab725f048a402e5336b29d39a6a49f736",
+      "downloadUrl": "https://sayinel.github.io/baram-plugins/plugins/baram-word-count-2.0.0.zip",
+      "checksum": "d7f30d18b11c74158321052a7e5941a0471c5fbebc5ab116df93577931e1ea37",
       "capabilities": [
         "editor:readonly",
         "events",
         "statusbar"
       ],
+      "trust": "sandboxed",
       "engines": {
-        "baram": ">=0.3.0"
+        "baram": ">=0.5.0"
       },
       "icon": "🔢",
       "keywords": [
@@ -51,5 +52,5 @@
       ]
     }
   ],
-  "updatedAt": "2026-07-16"
+  "updatedAt": "2026-07-30"
 }
