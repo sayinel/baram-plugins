@@ -1,0 +1,69 @@
+name: validate
+
+# The registry has had NO CI of any kind. `validate-index.ts` runs in two places, and
+# neither of them looks at this repository as it is merged:
+#
+#   - the app's `lint:frontend`, over `registry/index.json` — a SEED that no user ever
+#     fetches
+#   - the app's `plugin-release.yml` — only when a first-party plugin is released
+#
+# So anything merged here directly — a hand-added community entry, a hand-edited checksum,
+# a withdrawal that removed the wrong line — went live for every user's marketplace and
+# stayed live until the next first-party release happened to validate the whole index.
+#
+# ‼️ NO SECRET IS IN REACH OF THIS WORKFLOW, and that is deliberate. `pull_request` (never
+# `pull_request_target`) means a fork's PR runs with the fork's code and no credentials, and
+# `permissions: contents: read` withholds the rest. The validators only read files.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  # The index can also break without anyone touching it: GitHub Pages could stop serving an
+  # archive, or a checksum could have been wrong since the day it was pasted. A weekly run
+  # is how that gets noticed by us rather than by a user.
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      # The APP is checked out at the root, because the validators live there and expect to
+      # run from the repo they belong to (they import `src/plugins/*` by relative path, and
+      # the composite action below reads `.node-version` and `package-lock.json`).
+      #
+      # `ref: main` pins to what has shipped most recently, which is the strict direction: a
+      # rule the app tightened yesterday should block a publish today. It is NOT the version
+      # every user is running, so this can refuse an index that older apps read fine — that
+      # costs a publish, never a user.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: sayinel/baram
+          ref: main
+
+      # ...and the registry content under test goes in a subdirectory. On a pull_request
+      # this is the PR's merge commit, i.e. what main would become.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: registry-under-test
+
+      - uses: ./.github/actions/setup-node
+
+      # The document: field types serde must accept, tier, capabilities, `engines.baram`
+      # grammar, duplicate ids, URL scheme.
+      - name: Validate index.json
+        run: npx tsx scripts/validate-index.ts registry-under-test/index.json
+
+      # The archives: every entry points at a file that is actually here and hashes to the
+      # checksum it declares. This is the check that cannot run in the app repo, because the
+      # ZIPs only exist in this one.
+      - name: Validate the archives the index points at
+        run: npx tsx scripts/validate-registry-assets.ts registry-under-test
+
+      # The withdrawal list, by the same validator the app uses to read it.
+      - name: Validate revoked.json
+        run: npx tsx scripts/validate-revocations.ts registry-under-test/revoked.json
