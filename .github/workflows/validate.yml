@@ -3,24 +3,42 @@ name: validate
 # The registry has had NO CI of any kind. `validate-index.ts` runs in two places, and
 # neither of them looks at this repository as it is merged:
 #
-#   - the app's `lint:frontend`, over `registry/index.json` — a SEED that no user ever
-#     fetches
+#   - the app's `lint:frontend`, over `registry/index.json` — a SEED that no user fetches
 #   - the app's `plugin-release.yml` — only when a first-party plugin is released
 #
-# So anything merged here directly — a hand-added community entry, a hand-edited checksum,
-# a withdrawal that removed the wrong line — went live for every user's marketplace and
-# stayed live until the next first-party release happened to validate the whole index.
+# So anything landing here — a release workflow bug, a hand-edited checksum, a withdrawal
+# that removed the wrong line — went live for every user's marketplace and stayed live
+# until the next first-party release happened to validate the whole index.
 #
-# ‼️ NO SECRET IS IN REACH OF THIS WORKFLOW, and that is deliberate. `pull_request` (never
-# `pull_request_target`) means a fork's PR runs with the fork's code and no credentials, and
-# `permissions: contents: read` withholds the rest. The validators only read files.
+# ‼️ `pull_request_target`, DELIBERATELY, AND THE REASON IS THE OPPOSITE OF THE USUAL ONE.
+#
+# With `pull_request` the workflow file itself comes from the PR, so a hostile PR rewrites
+# this to `run: echo ok`, keeps the job name, and satisfies a required status check while
+# none of the validators run. A gate the thing it gates gets to author is not a gate.
+#
+# `pull_request_target` takes the workflow definition from the BASE branch, which fixes
+# that — at the cost of running with a token the fork does not control. That trade is only
+# safe while NOTHING IN THIS JOB EXECUTES CONTENT FROM THE PR:
+#
+#   - every executable line comes from the `sayinel/baram` checkout
+#   - `npm ci --ignore-scripts` runs no lifecycle script, from either repo
+#   - `registry-under-test/` is READ ONLY AS DATA — JSON parsed, ZIPs hashed
+#
+# ‼️ THAT INVARIANT IS LOAD-BEARING. Do not add a step that runs anything out of
+# `registry-under-test/` — no `npm`, no `node`, no `bash script.sh`, no action referenced by
+# a path inside it. If this repo ever needs to execute PR content, split it into a separate
+# `pull_request` job that holds no token.
+#
+# `permissions: contents: read` and `persist-credentials: false` keep the granted token as
+# small as it can be, and this repo holds no secrets, so the residual is a read token on a
+# public repo.
 on:
-  pull_request:
+  pull_request_target:
   push:
     branches: [main]
-  # The index can also break without anyone touching it: GitHub Pages could stop serving an
-  # archive, or a checksum could have been wrong since the day it was pasted. A weekly run
-  # is how that gets noticed by us rather than by a user.
+  # The index can also rot without anyone touching it: the app repo's `main` moves under
+  # us, so a rule tightened there turns a green index red with no change here. A weekly run
+  # is how that gets noticed by us rather than by a publish.
   schedule:
     - cron: "17 6 * * 1"
   workflow_dispatch:
@@ -32,38 +50,83 @@ jobs:
   validate:
     runs-on: ubuntu-latest
     steps:
-      # The APP is checked out at the root, because the validators live there and expect to
-      # run from the repo they belong to (they import `src/plugins/*` by relative path, and
-      # the composite action below reads `.node-version` and `package-lock.json`).
+      # ‼️ ORDER IS LOAD-BEARING. The app goes to the workspace ROOT and must come FIRST:
+      # `actions/checkout` defaults to `clean: true`, so doing this second would wipe
+      # `registry-under-test/`.
+      #
+      # The app is at the root because the validators belong to it — they import
+      # `src/plugins/*` by relative path, and the setup below reads `.node-version` and
+      # `package-lock.json`.
       #
       # `ref: main` pins to what has shipped most recently, which is the strict direction: a
       # rule the app tightened yesterday should block a publish today. It is NOT the version
-      # every user is running, so this can refuse an index that older apps read fine — that
-      # costs a publish, never a user.
+      # every user runs, so this can refuse an index older apps read fine — that costs a
+      # publish, never a user. The trade is that a green check here is only meaningful
+      # against the app commit it ran on, so that SHA is echoed into the job summary below.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: sayinel/baram
           ref: main
+          persist-credentials: false
 
-      # ...and the registry content under test goes in a subdirectory. On a pull_request
-      # this is the PR's merge commit, i.e. what main would become.
+      # ...and the registry content under test goes in a subdirectory. Explicitly the PR's
+      # HEAD, because `pull_request_target` would otherwise check out the base and validate
+      # the very thing the PR is changing away from.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           path: registry-under-test
+          persist-credentials: false
 
-      - uses: ./.github/actions/setup-node
+      - name: Record which app commit is judging this
+        run: |
+          echo "validators from sayinel/baram@$(git -C . rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version-file: .node-version
+          cache: npm
+
+      # `--ignore-scripts`, so no dependency's lifecycle hook runs in a job that also holds
+      # attacker-supplied files. The validators are plain TypeScript and `tsx` is a plain
+      # devDependency, so nothing here needs one. (Not the app's `setup-node` composite:
+      # that runs a bare `npm ci`, which is right for the app's own CI and wrong here.)
+      - run: npm ci --ignore-scripts
 
       # The document: field types serde must accept, tier, capabilities, `engines.baram`
       # grammar, duplicate ids, URL scheme.
       - name: Validate index.json
         run: npx tsx scripts/validate-index.ts registry-under-test/index.json
 
-      # The archives: every entry points at a file that is actually here and hashes to the
-      # checksum it declares. This is the check that cannot run in the app repo, because the
-      # ZIPs only exist in this one.
+      # The archives: every entry points at a file that is actually here, is a regular file
+      # rather than a link, and hashes to the checksum it declares. This is the check that
+      # cannot run in the app repo, because the ZIPs only exist in this one.
       - name: Validate the archives the index points at
         run: npx tsx scripts/validate-registry-assets.ts registry-under-test
 
       # The withdrawal list, by the same validator the app uses to read it.
       - name: Validate revoked.json
         run: npx tsx scripts/validate-revocations.ts registry-under-test/revoked.json
+
+      # ‼️ THE README'S IMMUTABILITY POLICY, WHICH NOTHING ENFORCED. "Once
+      # `plugins/<id>-<version>.zip` is served, its bytes never change" is the promise the
+      # app's checksum verification rests on — and a PR that swaps an archive AND updates
+      # its checksum in the same commit is internally consistent, so all three validators
+      # above pass it. Silent re-publication under a version users already trust is the
+      # highest-value attack on a registry.
+      #
+      # Deletion is included: removing a published archive is a bytes change from a client's
+      # view, and should be a decision someone states rather than a side effect.
+      - name: Published archives are immutable
+        if: github.event_name == 'pull_request_target'
+        working-directory: registry-under-test
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git fetch --depth=1 origin "$BASE_SHA"
+          CHANGED="$(git diff --name-only --diff-filter=MD "$BASE_SHA" HEAD -- 'plugins/*.zip')"
+          if [ -n "$CHANGED" ]; then
+            echo "::error::published archives modified or deleted:"
+            echo "$CHANGED"
+            exit 1
+          fi
