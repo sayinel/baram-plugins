@@ -124,7 +124,10 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           git fetch --depth=1 origin "$BASE_SHA"
-          CHANGED="$(git diff --name-only --diff-filter=MD "$BASE_SHA" HEAD -- 'plugins/*.zip')"
+          # `--no-renames --diff-filter=a`: everything but an ADDED archive is a change to bytes a
+          # client may already hold. `--diff-filter=MD` missed two such changes — a rename (git
+          # reports R; to a client the old URL is gone) and a file-to-symlink change (T).
+          CHANGED="$(git diff --no-renames --name-only --diff-filter=a "$BASE_SHA" HEAD -- 'plugins/*.zip')"
           if [ -n "$CHANGED" ]; then
             echo "::error::published archives modified or deleted:"
             echo "$CHANGED"
