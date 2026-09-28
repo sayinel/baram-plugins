@@ -1,0 +1,166 @@
+name: publish-community
+
+# §381 — mirrors community releases into this registry (spec 0058 §8, plan 0105).
+#
+# ‼️ A RUN RECONCILES; IT DOES NOT PUBLISH "THE ONE THAT WAS MERGED". GitHub keeps one pending
+# run per concurrency group, so a dispatch can be dropped. Every run compares each
+# community/*.json with community.json and publishes what is behind; a dropped dispatch is
+# picked up by the next push, dispatch or the weekly schedule.
+#
+# ‼️ NOTHING FROM A PLUGIN EXECUTES HERE. The ZIP is downloaded, hashed, read as data and
+# copied. The CLI this job runs, and every dependency it installs, come from the
+# sayinel/baram@main checkout and its lockfile; `npm ci --ignore-scripts` runs none of those
+# dependencies' lifecycle scripts.
+#
+# A release reaches main through a pull request from a `community-publish/` branch, which this
+# job squash-merges at the commit it validated. Nothing else produces the required `validate`
+# check for that pull request, so the job posts that commit status itself
+# (scripts/community-pull-request.ts in sayinel/baram).
+#
+# This repository holds no secrets; the job writes with its GITHUB_TOKEN. A merge made with that
+# token starts no push workflow. That is why the validate workflow's merge job dispatches this
+# one, and why no run re-validates main right after this job's own merges: the next `validate`
+# run is the weekly one, a dispatch, or a push to main not made with GITHUB_TOKEN.
+# RESIDUAL (plan 0105 P12): the token is in the environment of the reconcile step, which runs
+# tsx, esbuild and zip.js — the code that produces the commit being delivered.
+# RESIDUAL (plan 0105 P25): the ruleset's required `validate` check can be met by a commit
+# STATUS, and any job in this repository holding `statuses: write` can post one. Of the two
+# workflow files in .github/workflows/, this job is the only one that holds it; a workflow
+# change that grants it elsewhere needs the same scrutiny as this file.
+on:
+  push:
+    branches: [main]
+    paths: ["community/**"]
+  workflow_dispatch:
+  schedule:
+    - cron: "41 7 * * 1"
+
+# ‼️ ONE RUN AT A TIME, AND A NEWER RUN WAITS RATHER THAN CANCELS. Before it delivers anything,
+# the CLI closes every open pull request from a `community-publish/` branch of this repository
+# as a leftover of an earlier run (`sweepAbandonedPullRequests`), so a run overlapping this one
+# would close the pull request this one is delivering through; and a cancelled run can stop
+# between merging a squash and checking the tree it landed. That branch prefix belongs to this
+# job: a pull request a person opens from such a branch is closed too.
+#
+# A run that reaches `timeout-minutes` below is cancelled as well and can stop in the same
+# place, without printing why. The timeout is kept rather than raised: a manual cancel or a lost
+# runner stops a run the same way, so the cover has to exist anyway. It is the next run's sweep
+# (a pull request left open) and the README's "Maintainer runbook" (a squash left unchecked).
+#
+# This group does not hold back `validate.yml`'s merge job, which can move main while this job
+# is between its base check and its squash — the usual, benign cause of a landed tree that is
+# not the validated one (README, "Maintainer runbook").
+concurrency:
+  group: community-publish
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pages: write
+      pull-requests: write
+      statuses: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: sayinel/baram
+          ref: main
+          persist-credentials: false
+      # Full history: the publish-time check reads the commit that brought each descriptor, and
+      # for an id not yet published the commit that first added it, which a shallow clone
+      # cannot tell and the CLI refuses. `registry-live`, not `registry`: the sayinel/baram
+      # checkout above tracks a `registry/` of its own. `persist-credentials: false`: the CLI
+      # hands git its own credentials as an extra header, and a persisted one would add a second.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          path: registry-live
+          fetch-depth: 0
+          persist-credentials: false
+      # The pull request delivery tells a lost race from a refusal by gh's English error text,
+      # matched against gh 2.101.0 (scripts/community-pull-request.ts), so the gh this runner
+      # has goes in the log.
+      - name: Record which app commit is publishing, and which gh
+        run: |
+          echo "validators from sayinel/baram@$(git -C . rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
+          gh --version
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - run: npm ci --ignore-scripts
+      # Exit 0: nothing failed. 1: at least one descriptor failed, and the others were handled.
+      # 2: a workflow or infrastructure error, which includes an ABORT (the report's `aborted`),
+      # after which no further descriptor was handled. The exit code is recorded as
+      # the `exit` output for the steps below, and the step still fails the job on 1 or 2.
+      - name: Reconcile community/*.json with community.json
+        id: reconcile
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REGISTRY_REPO: ${{ github.repository }}
+          # Declarative only: the runner sets both default variables itself, and an `env:` entry
+          # cannot override one (GitHub's variables reference). The values are the same.
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set +e
+          npx tsx scripts/run-community-publish.ts reconcile \
+            --registry registry-live \
+            --base-url https://sayinel.github.io/baram-plugins/ \
+            --report "$RUNNER_TEMP/community-publish.json" \
+            --delivery pull-request
+          code=$?
+          echo "exit=$code" >> "$GITHUB_OUTPUT"
+          exit "$code"
+      # ‼️ WHAT RUNS AFTER RECONCILE. `!cancelled()` rather than the default, so a failed
+      # reconcile does not skip every step below: a descriptor that failed (exit 1) must not keep
+      # the releases that published in the same run from being built and verified.
+      #
+      # Exit 2 requests no build and runs no live check, so this run does not vouch for a tree
+      # nobody checked: an abort can be a squash that landed a tree nobody compared with the
+      # validated one. That need not keep the tree unserved: GitHub documents that a push made
+      # with GITHUB_TOKEN triggers no Pages build, but plan 0105 Task 1 (M5) measured one that
+      # did. So Pages may serve it already, and the README's "Maintainer runbook" has a person
+      # check it at once. An exit 2 without an abort is the CLI stopping on an error of its own
+      # before it finished, and is treated the same.
+      #
+      # The live check runs whenever reconcile exited 0 or 1, even on a run that published
+      # nothing: a run whose live check timed out is verified by the next (plan 0105 P14). A
+      # Pages build is requested only when this run published something. The job ends red
+      # whenever reconcile or live exits non-zero.
+      - name: Request a Pages build
+        if: "!cancelled() && (steps.reconcile.outputs.exit == '0' || steps.reconcile.outputs.exit == '1') && steps.reconcile.outputs.published != '0'"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X POST "repos/$GITHUB_REPOSITORY/pages/builds"
+      - name: Wait until Pages serves what main holds
+        if: "!cancelled() && (steps.reconcile.outputs.exit == '0' || steps.reconcile.outputs.exit == '1')"
+        run: >-
+          npx tsx scripts/run-community-publish.ts live
+          --registry registry-live
+          --base-url https://sayinel.github.io/baram-plugins/
+          --report "$RUNNER_TEMP/community-publish.json"
+      # After an abort too: the report still lists the stalled failures that came before it.
+      - name: Tell authors whose release asset changed after review
+        if: "!cancelled() && steps.reconcile.outputs.stalled != '' && steps.reconcile.outputs.stalled != '0'"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPORT: ${{ runner.temp }}/community-publish.json
+        run: |
+          set -o pipefail
+          MARKER='<!-- baram-community-stalled -->'
+          BODY="$(printf '%s\n%s' "$MARKER" "The release asset changed after this submission was reviewed, so it was not published. A published version's bytes never change: release a new version and submit it again.")"
+          PRS="$(jq -r '.failed[] | select(.stalled and .pr != null) | .pr' "$REPORT" | sort -u)"
+          for PR in $PRS; do
+            COMMENTS="$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate --jq '.[].body')"
+            if grep -qF "$MARKER" <<< "$COMMENTS"; then
+              continue
+            fi
+            gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body "$BODY"
+          done
