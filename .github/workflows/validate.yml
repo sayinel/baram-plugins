@@ -16,9 +16,9 @@ name: validate
 # this to `run: echo ok`, keeps the job name, and satisfies a required status check while
 # none of the validators run. A gate the thing it gates gets to author is not a gate.
 #
-# `pull_request_target` takes the workflow definition from the BASE branch, which fixes
-# that — at the cost of running with a token the fork does not control. That trade is only
-# safe while NOTHING IN THIS JOB EXECUTES CONTENT FROM THE PR:
+# `pull_request_target` takes the workflow definition from the repository's DEFAULT branch
+# (main), which fixes that — at the cost of running with a token the fork does not control.
+# That trade is only safe while NOTHING IN THIS JOB EXECUTES CONTENT FROM THE PR:
 #
 #   - every executable line comes from the `sayinel/baram` checkout
 #   - `npm ci --ignore-scripts` runs no lifecycle script, from either repo
@@ -29,11 +29,23 @@ name: validate
 # a path inside it. If this repo ever needs to execute PR content, split it into a separate
 # `pull_request` job that holds no token.
 #
-# `permissions: contents: read` and `persist-credentials: false` keep the granted token as
-# small as it can be, and this repo holds no secrets, so the residual is a read token on a
-# public repo.
+# `permissions: contents: read` and `persist-credentials: false` keep the `validate` job's
+# token as small as it can be, and this repo holds no secrets. The `merge` and `label` jobs
+# below hold write tokens and, for that reason, check out nothing and run nothing the pull
+# request wrote.
+#
+# §380 — COMMUNITY SUBMISSIONS (spec 0058 §7, plan 0105). A pull request that touches
+# community/ is judged by scripts/run-community-gate.ts from sayinel/baram@main, against the
+# ONE head SHA this event named. The `merge` job acts on the `validate` job's two outputs and
+# the event's pull request number, and merges only that SHA (`--match-head-commit`), so a
+# commit pushed after validation cannot ride along. A pull request that never touches
+# community/, or only deletes descriptors there, is not a submission: it is validated as
+# before, labelled `needs-review`, and merged only by a person.
 on:
   pull_request_target:
+    # Only pull requests into main: the `merge` job would otherwise auto-merge a submission into
+    # a branch no ruleset protects.
+    branches: [main]
   push:
     branches: [main]
   # The index can also rot without anyone touching it: the app repo's `main` moves under
@@ -43,12 +55,21 @@ on:
     - cron: "17 6 * * 1"
   workflow_dispatch:
 
+# One run per pull request. A new push cancels the run judging the older head — merge job
+# included, which merges only the SHA its own run validated.
+concurrency:
+  group: validate-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
 jobs:
   validate:
     runs-on: ubuntu-latest
+    outputs:
+      decision: ${{ steps.gate.outputs.decision }}
+      head_sha: ${{ steps.gate.outputs.head_sha }}
     steps:
       # ‼️ ORDER IS LOAD-BEARING. The app goes to the workspace ROOT and must come FIRST:
       # `actions/checkout` defaults to `clean: true`, so doing this second would wipe
@@ -78,6 +99,19 @@ jobs:
           path: registry-under-test
           persist-credentials: false
 
+      # §380 — what the registry publishes NOW, to judge a submission against: ids already
+      # taken, the published version, the recorded publisher and repository ids, and a
+      # descriptor merged but not yet published. Full history: the gate reads the commit that
+      # first added that descriptor since its last deletion, and stops on a shallow clone
+      # (plan 0105 P24).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: github.event_name == 'pull_request_target'
+        with:
+          ref: main
+          path: registry-base
+          fetch-depth: 0
+          persist-credentials: false
+
       - name: Record which app commit is judging this
         run: |
           echo "validators from sayinel/baram@$(git -C . rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
@@ -97,6 +131,11 @@ jobs:
       # grammar, duplicate ids, URL scheme.
       - name: Validate index.json
         run: npx tsx scripts/validate-index.ts registry-under-test/index.json
+
+      # §381 — the second channel, by the same validator (it picks the community rules by the
+      # file's top-level key).
+      - name: Validate community.json
+        run: npx tsx scripts/validate-index.ts registry-under-test/community.json
 
       # The archives: every entry points at a file that is actually here, is a regular file
       # rather than a link, and hashes to the checksum it declares. This is the check that
@@ -123,13 +162,82 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          git fetch --depth=1 origin "$BASE_SHA"
-          # `--no-renames --diff-filter=a`: everything but an ADDED archive is a change to bytes a
-          # client may already hold. `--diff-filter=MD` missed two such changes — a rename (git
-          # reports R; to a client the old URL is gone) and a file-to-symlink change (T).
-          CHANGED="$(git diff --no-renames --name-only --diff-filter=a "$BASE_SHA" HEAD -- 'plugins/*.zip')"
+          # ‼️ AGAINST THE MERGE BASE, NOT `base.sha` (plan 0105 P16). BASE_SHA is the base
+          # commit the event payload records, not the fork point: when main moved after this
+          # branch forked, it can be ahead of the fork point, and an archive published in between
+          # shows as DELETED in base..head and would fail an unrelated pull request. What the
+          # pull request changes is merge-base..head.
+          git fetch --no-tags --unshallow origin "$BASE_SHA"
+          MERGE_BASE="$(git merge-base "$BASE_SHA" HEAD)"
+          # `--no-renames --diff-filter=a` (plan 0102): everything but an ADDED archive is a
+          # change to bytes a client may already hold — a rename (git reports R; to a client the
+          # old URL is gone) and a file-to-symlink change (T) included.
+          CHANGED="$(git diff --no-renames --name-only --diff-filter=a "$MERGE_BASE" HEAD -- 'plugins/*.zip')"
           if [ -n "$CHANGED" ]; then
             echo "::error::published archives modified or deleted:"
             echo "$CHANGED"
             exit 1
           fi
+
+      # §380 — LAST, so a decision exists only for a pull request every check above passed.
+      - name: Community submission gate
+        id: gate
+        if: github.event_name == 'pull_request_target'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_AUTHOR_ID: ${{ github.event.pull_request.user.id }}
+          REGISTRY_REPO: ${{ github.repository }}
+        run: >-
+          npx tsx scripts/run-community-gate.ts
+          --pr-root registry-under-test
+          --published-root registry-base
+          --base-url https://sayinel.github.io/baram-plugins/
+
+  merge:
+    needs: validate
+    if: github.event_name == 'pull_request_target' && needs.validate.outputs.decision == 'auto-merge'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: write
+      pull-requests: write
+    steps:
+      # ‼️ NO CHECKOUT, and nothing the pull request wrote runs here. The inputs are the
+      # validate job's two outputs, written by the gate from values it checked, and the event's
+      # pull request number.
+      #
+      # `--match-head-commit` pins what is merged, not where: a pull request retargeted after
+      # validation (an edit, which starts no new run) would be squashed into that other branch,
+      # which no ruleset protects. So the base is read again first. That narrows the window to
+      # the moment between the read and the merge; it does not close it.
+      - name: Merge exactly the commit the gate validated
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ needs.validate.outputs.head_sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::the validate job produced no head SHA — refusing to merge"; exit 1; }
+          BASE_REF="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json baseRefName --jq .baseRefName)" \
+            || { echo "::error::reading the pull request's base branch failed — refusing to merge"; exit 1; }
+          [ "$BASE_REF" = main ] || { echo "::error::the pull request no longer targets main — refusing to merge"; exit 1; }
+          gh pr merge "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --squash --match-head-commit "$HEAD_SHA"
+      # A merge made with GITHUB_TOKEN triggers no push workflow; workflow_dispatch is a
+      # documented exception (plan 0105 Task 1 M6 measured it with this job's `actions: write`).
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run publish-community.yml --repo "$GITHUB_REPOSITORY" --ref main
+
+  label:
+    needs: validate
+    if: github.event_name == 'pull_request_target' && (needs.validate.outputs.decision == 'needs-review' || needs.validate.outputs.decision == 'maintenance')
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: gh pr edit "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --add-label needs-review
