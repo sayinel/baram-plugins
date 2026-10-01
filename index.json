@@ -49,7 +49,60 @@
         "focus"
       ],
       "readme": "https://sayinel.github.io/baram-plugins/readme/baram-bullet-threading-2.1.0.md"
+    },
+    {
+      "id": "baram-hangul",
+      "name": "Baram Hangul",
+      "description": "Made for writing in Korean: words stay whole at line breaks, set in Pretendard on cream paper.",
+      "version": "1.0.0",
+      "author": "Baram",
+      "license": "Apache-2.0",
+      "downloadUrl": "https://sayinel.github.io/baram-plugins/plugins/baram-hangul-1.0.0.zip",
+      "checksum": "b03c5b7095ae9700700e12851b27bd1e701f8184c38d3d561223fbef5f3848a5",
+      "capabilities": [],
+      "engines": {
+        "baram": ">=0.7.7"
+      },
+      "kind": "theme",
+      "preview": {
+        "light": {
+          "--color-bg-default": "#fbf9f4",
+          "--color-bg-panel": "#f0ece1",
+          "--color-bg-subtle": "#f4f1e8",
+          "--color-bg-elevated": "#ffffff",
+          "--color-border-default": "#ded8c9",
+          "--color-text-primary": "#2b2722",
+          "--color-text-secondary": "#5c554a",
+          "--color-accent-default": "#2f4f86",
+          "--color-accent-subtle": "#e8ecf4",
+          "--color-editor-bg": "#fbf9f4",
+          "--color-editor-text": "#2b2722",
+          "--color-editor-selection": "#d9e0ee",
+          "--color-editor-cursor": "#2f4f86",
+          "--color-status-warning": "#96690f",
+          "--color-status-success": "#4a7c3f",
+          "--color-status-danger": "#b3392f"
+        },
+        "dark": {
+          "--color-bg-default": "#1c1a17",
+          "--color-bg-panel": "#191714",
+          "--color-bg-subtle": "#232019",
+          "--color-bg-elevated": "#2a261f",
+          "--color-border-default": "#3a352c",
+          "--color-text-primary": "#e8e2d6",
+          "--color-text-secondary": "#b0a696",
+          "--color-accent-default": "#8ea8dc",
+          "--color-accent-subtle": "#222838",
+          "--color-editor-bg": "#1c1a17",
+          "--color-editor-text": "#e8e2d6",
+          "--color-editor-selection": "#2c3550",
+          "--color-editor-cursor": "#8ea8dc",
+          "--color-status-warning": "#dcae55",
+          "--color-status-success": "#8fbf7f",
+          "--color-status-danger": "#e07a70"
+        }
+      }
     }
   ],
-  "updatedAt": "2026-09-22"
+  "updatedAt": "2026-10-01"
 }
