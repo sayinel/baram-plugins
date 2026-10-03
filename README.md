@@ -1,11 +1,13 @@
 # Baram Plugin Registry
 
-Plugin registry and distribution channel for [Baram](https://github.com/sayinel/baram),
-served via GitHub Pages.
+Plugin and theme registry and distribution channel for
+[Baram](https://github.com/sayinel/baram), served via GitHub Pages.
 
-- `index.json` — the first-party registry index the app's marketplace fetches
+- `index.json` — the first-party registry index the app's plugin marketplace
+  and **Browse Themes** fetch
 - `community.json` — the community list the marketplace fetches beside it
-- `plugins/*.zip` — plugin packages (SHA-256 verified at install time)
+- `plugins/*.zip` — plugin and theme packages (SHA-256 verified at install
+  time)
 - `readme/*.md` — plugin READMEs the marketplace's detail view shows
 - `revoked.json` and `revoked.json.sig` — the signed withdrawal list the app
   checks
@@ -14,10 +16,11 @@ served via GitHub Pages.
 
 This registry serves two channels, one file each:
 
-- `index.json` — first-party Baram plugins, published by the Baram
-  repository's `plugin-release.yml`.
+- `index.json` — first-party Baram plugins and themes, published by the Baram
+  repository's `plugin-release.yml`. A theme entry has `"kind": "theme"`, no
+  `trust`, and a `preview` palette for each of its modes.
 - `community.json` — community plugins, **sandboxed only**, submitted by pull
-  request (below).
+  request (below). It does not take themes.
 
 `main` is protected. The Baram repository's two publishing workflows
 (`plugin-release.yml` and `revocation-publish.yml`) push to it with a deploy
@@ -53,22 +56,26 @@ Full guide: https://baram.ing/en/docs/plugin-dev/community-registry/
 ## How it is updated
 
 - `index.json` and first-party archives: `plugin-release.yml` in the Baram
-  repository, when a `plugin-<dir>-v<version>` tag is pushed there.
+  repository, when a `plugin-<dir>-v<version>` or `theme-<dir>-v<version>` tag
+  is pushed there. Both jobs run in that repository's `registry-publish`
+  environment and wait for a maintainer's approval; a theme release also stops
+  unless the ZIP it built matches the SHA-256 recorded in the theme's
+  `SHA256SUMS`.
 - `community.json`, community archives and READMEs: `publish-community.yml`
   here, after a submission merges, and weekly.
 - `revoked.json`: `revocation-publish.yml` in the Baram repository.
 
-To withdraw a plugin, open an issue. Withdrawal goes through the signed
-revocation list; published archives are never deleted.
+To withdraw a plugin or a theme, open an issue. Withdrawal goes through the
+signed revocation list; published archives are never deleted.
 
 ## Versioning policy
 
 Published versions are **immutable**: once `plugins/<id>-<version>.zip` is
-served, its bytes never change. To ship a fix, bump the plugin version and
-release again — never overwrite an existing ZIP. Re-serving changed bytes
-under the same filename would break SHA-256 verification for clients that
-fetched the index during the Pages CDN window (~10 min), and defeats the
-point of pinned checksums.
+served, its bytes never change. To ship a fix, bump the plugin's or theme's
+version and release again — never overwrite an existing ZIP. Re-serving
+changed bytes under the same filename would break SHA-256 verification for
+clients that fetched the index during the Pages CDN window (~10 min), and
+defeats the point of pinned checksums.
 
 ## Maintainer runbook
 
